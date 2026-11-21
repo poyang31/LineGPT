@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="Line.Bot.SDK" Version="5.0.0" />
+    <PackageReference Include="AngleSharp" Version="1.10.0" />
     <PackageReference Include="OpenAI" Version="2.9.1" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.7" />
     <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />

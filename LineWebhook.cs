@@ -84,7 +84,8 @@ public sealed class LineWebhook(IConfiguration configuration, AgentService agent
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(40));
+            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(
+                configuration.GetValue("Agent:TimeoutSeconds", 60), 1, 300)));
             text = await agent.RunAsync(message, timeout.Token);
             if (string.IsNullOrWhiteSpace(text))
                 text = "暫時無法產生回覆，請稍後再試。";

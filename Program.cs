@@ -2,6 +2,7 @@ using LineGPT;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddOpenApi();
+builder.Services.AddHttpClient<WebSearchService>();
 builder.Services.AddSingleton<AgentService>();
 builder.Services.AddSingleton<LineWebhook>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<LineWebhook>());
