@@ -4,10 +4,10 @@ using System.Threading.Channels;
 
 namespace LineGPT;
 
-public sealed class LineWebhook(IConfiguration configuration, AgentService agent, ILogger<LineWebhook> logger) : BackgroundService
+public sealed class LineWebhook(IConfiguration configuration, AgentService agent, ConversationMemory memory, ILogger<LineWebhook> logger) : BackgroundService
 {
-    private readonly Channel<(string Text, string ReplyToken)> pending =
-        Channel.CreateBounded<(string, string)>(new BoundedChannelOptions(100)
+    private readonly Channel<(string Key, string Text, string ReplyToken)> pending =
+        Channel.CreateBounded<(string, string, string)>(new BoundedChannelOptions(100)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true
@@ -52,7 +52,10 @@ public sealed class LineWebhook(IConfiguration configuration, AgentService agent
                 evt.ReplyToken is "00000000000000000000000000000000" or "ffffffffffffffffffffffffffffffff")
                 continue;
 
-            if (!pending.Writer.TryWrite((evt.Message.Text, evt.ReplyToken)))
+            var key = GetConversationKey(evt.Source);
+            if (key is null) continue;
+
+            if (!pending.Writer.TryWrite((key, evt.Message.Text, evt.ReplyToken)))
                 return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
 
@@ -65,7 +68,7 @@ public sealed class LineWebhook(IConfiguration configuration, AgentService agent
         {
             try
             {
-                await ReplyAsync(evt.Text, evt.ReplyToken, stoppingToken);
+                await ReplyAsync(evt.Key, evt.Text, evt.ReplyToken, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -78,15 +81,17 @@ public sealed class LineWebhook(IConfiguration configuration, AgentService agent
         }
     }
 
-    private async Task ReplyAsync(string message, string replyToken, CancellationToken cancellationToken)
+    private async Task ReplyAsync(string conversationKey, string message, string replyToken, CancellationToken cancellationToken)
     {
         string text;
+        var generated = false;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(
                 configuration.GetValue("Agent:TimeoutSeconds", 60), 1, 300)));
-            text = await agent.RunAsync(message, timeout.Token);
+            text = await agent.RunAsync(conversationKey, message, timeout.Token);
+            generated = !string.IsNullOrWhiteSpace(text);
             if (string.IsNullOrWhiteSpace(text))
                 text = "暫時無法產生回覆，請稍後再試。";
         }
@@ -104,6 +109,19 @@ public sealed class LineWebhook(IConfiguration configuration, AgentService agent
             text = text[..length] + "…";
         }
         await bot.Value.Reply(replyToken, new TextMessage(text));
+        if (generated) memory.AppendTurn(conversationKey, message, text);
+    }
+
+    internal static string? GetConversationKey(IEventSource? source)
+    {
+        var (kind, id) = source?.SourceType switch
+        {
+            EventSourceType.User => ("user", source.User?.Id),
+            EventSourceType.Group => ("group", source.Group?.Id),
+            EventSourceType.Room => ("room", source.Room?.Id),
+            _ => ("", "")
+        };
+        return string.IsNullOrWhiteSpace(id) ? null : $"{kind}:{id}";
     }
 
     private sealed record LineConfiguration(string ChannelAccessToken, string ChannelSecret) : ILineConfiguration;

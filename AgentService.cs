@@ -5,9 +5,9 @@ using System.Text.Json;
 
 namespace LineGPT;
 
-public sealed class AgentService(IConfiguration configuration, WebSearchService search, ILogger<AgentService> logger)
+public sealed class AgentService(IConfiguration configuration, WebSearchService search, ConversationMemory memory, ILogger<AgentService> logger)
 {
-    public async Task<string> RunAsync(string message, CancellationToken cancellationToken)
+    public async Task<string> RunAsync(string conversationKey, string message, CancellationToken cancellationToken)
     {
         var apiKey = configuration["OpenAI:ApiKey"];
         if (string.IsNullOrWhiteSpace(apiKey))
@@ -30,7 +30,8 @@ public sealed class AgentService(IConfiguration configuration, WebSearchService 
         var zone = TimeZoneInfo.FindSystemTimeZoneById(configuration["TimeZone"] ?? "Asia/Taipei");
         var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, zone).ToString("yyyy-MM-ddTHH:mm:sszzz");
         var time = $"目前時間（{zone.Id}）：{now}。日期、星期與相對時間依此計算。";
-        var queries = await PlanSearchAsync(client, message, time, cancellationToken);
+        var history = memory.GetHistory(conversationKey).TakeLast(ConversationMemory.WindowSize - 1).ToArray();
+        var queries = await PlanSearchAsync(client, history, message, time, cancellationToken);
         var results = await Task.WhenAll(queries.Select(q => search.SearchAsync(q, cancellationToken)));
         var sources = results.SelectMany(r => r).DistinctBy(s => s.Url).ToArray();
         var missing = queries.Where((_, i) => results[i].Count == 0).ToArray();
@@ -45,9 +46,15 @@ public sealed class AgentService(IConfiguration configuration, WebSearchService 
             question = context + "\n\n使用者問題：\n" + message;
         }
         var response = await client.CompleteChatAsync(
-            [new SystemChatMessage(system), new UserChatMessage(question)], cancellationToken: cancellationToken);
+            [new SystemChatMessage(system), .. history, new UserChatMessage(question)],
+            CreateCompletionOptions(), cancellationToken);
         var answer = string.Concat(response.Value.Content.Select(part => part.Text));
-        if (string.IsNullOrWhiteSpace(answer)) answer = "暫時無法產生回覆，請稍後再試。";
+        if (string.IsNullOrWhiteSpace(answer))
+        {
+            logger.LogWarning("Model returned empty content (FinishReason: {FinishReason}, OutputTokens: {OutputTokens}).",
+                response.Value.FinishReason, response.Value.Usage?.OutputTokenCount);
+            return "暫時無法產生回覆，請稍後再試。";
+        }
         if (queries.Length > 0 && sources.Length == 0)
             answer += "\n\n本次網頁搜尋未取得可用資料，以上內容未經網頁查證。";
         else if (missing.Length > 0)
@@ -57,13 +64,13 @@ public sealed class AgentService(IConfiguration configuration, WebSearchService 
         return answer;
     }
 
-    private async Task<string[]> PlanSearchAsync(ChatClient client, string message, string time, CancellationToken cancellationToken)
+    private async Task<string[]> PlanSearchAsync(ChatClient client, ChatMessage[] history, string message, string time, CancellationToken cancellationToken)
     {
         try
         {
             var response = await client.CompleteChatAsync(
                 [new SystemChatMessage("你是搜尋規劃器。判斷問題中需要網頁資料的部分，拆成最多三個獨立搜尋詞。最新資訊、新聞、價格、查證或明確要求搜尋時使用搜尋。閒聊、翻譯、改寫、創作、一般知識及日期時間問題使用空清單。只輸出 JSON：{\"queries\":[\"搜尋詞\"]}；無須搜尋時輸出 {\"queries\":[]}。\n" + time),
-                 new UserChatMessage(message)], new ChatCompletionOptions { Temperature = 0 }, cancellationToken);
+                 .. history, new UserChatMessage(message)], CreateCompletionOptions(temperature: 0), cancellationToken);
             var content = string.Concat(response.Value.Content.Select(p => p.Text));
             // Accept surrounding prose/code fences without modifying model output or think blocks.
             var start = content.IndexOf('{');
@@ -78,6 +85,12 @@ public sealed class AgentService(IConfiguration configuration, WebSearchService 
             return string.IsNullOrWhiteSpace(message) ? [] : [message[..Math.Min(message.Length, 500)]];
         }
     }
+
+    private ChatCompletionOptions CreateCompletionOptions(float? temperature = null) => new()
+    {
+        MaxOutputTokenCount = Math.Clamp(configuration.GetValue("OpenAI:MaxOutputTokens", 4096), 1, 32768),
+        Temperature = temperature ?? Math.Clamp(configuration.GetValue("OpenAI:Temperature", 1.0f), 0, 2)
+    };
 
     private static string[] ReadPlan(byte[] bytes)
     {

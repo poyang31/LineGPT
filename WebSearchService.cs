@@ -15,7 +15,6 @@ public sealed class WebSearchService(HttpClient http, IConfiguration configurati
         {
             using var request = new HttpRequestMessage(HttpMethod.Get,
                 "https://search.yahoo.com/search?p=" + Uri.EscapeDataString(query[..Math.Min(query.Length, 500)]));
-            request.Headers.UserAgent.ParseAdd("Mozilla/5.0 (compatible; LineGPT/1.0)");
             using var response = await http.SendAsync(request, timeout.Token);
             response.EnsureSuccessStatusCode();
             var html = await response.Content.ReadAsStringAsync(timeout.Token);
